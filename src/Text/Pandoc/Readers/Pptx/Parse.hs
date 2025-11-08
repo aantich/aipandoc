@@ -13,6 +13,7 @@ Parsing of PPTX archive to intermediate representation.
 module Text.Pandoc.Readers.Pptx.Parse
   ( Pptx(..)
   , PresentationDoc(..)
+  , PptxSlide(..)
   , SlideId(..)
   , archiveToPptx
   ) where
@@ -20,10 +21,12 @@ module Text.Pandoc.Readers.Pptx.Parse
 import Codec.Archive.Zip (Archive, Entry, findEntryByPath, fromEntry)
 import qualified Data.ByteString.Lazy as B
 import Data.List (find)
+import Data.Maybe (mapMaybe)
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TL
 import Data.Text (Text)
+import System.FilePath (splitFileName)
 import Text.Pandoc.Readers.OOXML.Shared
 import Text.Pandoc.XML.Light
 import Text.Read (readMaybe)
@@ -34,6 +37,15 @@ newtype SlideId = SlideId Int deriving (Show, Eq, Ord)
 -- | Complete PPTX document (intermediate representation)
 data Pptx = Pptx
   { pptxPresentation :: PresentationDoc
+  , pptxSlides       :: [PptxSlide]
+  , pptxArchive      :: Archive
+  } deriving (Show)
+
+-- | Individual slide data
+data PptxSlide = PptxSlide
+  { slideId      :: SlideId
+  , slidePath    :: FilePath
+  , slideElement :: Element  -- The parsed p:sld element
   } deriving (Show)
 
 -- | Presentation-level information from presentation.xml
@@ -51,7 +63,14 @@ archiveToPptx archive = do
   presElem <- loadXMLFromArchive archive presPath
   presDoc <- elemToPresentation presElem
 
-  return $ Pptx presDoc
+  -- Load presentation relationships to resolve slide paths
+  presRelsPath <- getPresentationRelsPath archive presPath
+  presRels <- loadRelationships archive presRelsPath
+
+  -- Parse each slide
+  slides <- mapM (parseSlide archive presRels) (presSlideIds presDoc)
+
+  return $ Pptx presDoc slides archive
 
 -- | Find presentation.xml via root relationships
 getPresentationXmlPath :: Archive -> Either Text FilePath
@@ -147,6 +166,44 @@ readAttrInt attrName elem =
       Just n -> n
       Nothing -> 0
     Nothing -> 0
+
+-- | Get presentation relationships path
+getPresentationRelsPath :: Archive -> FilePath -> Either Text FilePath
+getPresentationRelsPath _archive presPath =
+  -- ppt/presentation.xml → ppt/_rels/presentation.xml.rels
+  let (dir, file) = splitFileName presPath
+      relsPath = dir ++ "/_rels/" ++ file ++ ".rels"
+   in Right relsPath
+
+-- | Load relationships from .rels file
+loadRelationships :: Archive -> FilePath -> Either Text [(Text, Text)]
+loadRelationships archive relsPath =
+  case findEntryByPath relsPath archive of
+    Nothing -> Right []  -- No relationships is OK
+    Just entry -> do
+      relsElem <- parseXMLFromEntry entry
+      let relElems = onlyElems $ elContent relsElem
+      return $ mapMaybe extractRelationship relElems
+  where
+    extractRelationship elem = do
+      relId <- findAttr (unqual "Id") elem
+      target <- findAttr (unqual "Target") elem
+      return (relId, target)
+
+-- | Parse a single slide
+parseSlide :: Archive -> [(Text, Text)] -> (SlideId, Text) -> Either Text PptxSlide
+parseSlide archive rels (sid, relId) = do
+  -- Resolve relationship to get slide path
+  target <- maybeToEither ("Relationship not found: " <> relId) $
+            lookup relId rels
+
+  -- Resolve relative path: ppt/slides/slide1.xml
+  let slidePath = "ppt/" <> T.unpack target
+
+  -- Load and parse slide XML
+  slideElem <- loadXMLFromArchive archive slidePath
+
+  return $ PptxSlide sid slidePath slideElem
 
 -- | Helper: Maybe a -> Either Text a
 maybeToEither :: Text -> Maybe a -> Either Text a
