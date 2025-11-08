@@ -19,20 +19,34 @@ module Text.Pandoc.Readers.Pptx.Shapes
 
 import Codec.Archive.Zip (Archive, findEntryByPath, fromEntry)
 import qualified Data.ByteString.Lazy as B
-import Data.List (find)
+import Data.List (find, groupBy)
 import Data.Maybe (mapMaybe)
 import qualified Data.Text as T
 import Data.Text (Text)
--- (removed Text.Pandoc.Builder import)
+import Text.Read (readMaybe)
 import Text.Pandoc.Class.PandocMonad (PandocMonad)
 import qualified Text.Pandoc.Class.PandocMonad as P
 import Text.Pandoc.Definition
 import Text.Pandoc.Readers.OOXML.Shared
 import Text.Pandoc.XML.Light
 
+-- | Paragraph with bullet/numbering information
+data PptxParagraph = PptxParagraph
+  { paraLevel   :: Int            -- Bullet level (0, 1, 2...)
+  , paraBullet  :: BulletType
+  , paraText    :: Text
+  } deriving (Show)
+
+-- | Bullet type
+data BulletType
+  = NoBullet
+  | Bullet                        -- Has bullet (character detected or implicit)
+  | WingdingsBullet              -- Detected via Wingdings symbol
+  deriving (Show, Eq)
+
 -- | Shape types in PPTX slides
 data PptxShape
-  = PptxTextBox Text                    -- Plain text content
+  = PptxTextBox [PptxParagraph]         -- Parsed paragraphs with bullet info
   | PptxPicture
       { picRelId  :: Text               -- Relationship ID (lazy loading)
       , picTitle  :: Text
@@ -57,10 +71,10 @@ parseShape ns elem
   | isElem ns "p" "sp" elem =
       case findChildByName ns "p" "txBody" elem of
         Just txBody ->
-          let text = extractDrawingMLText txBody
-           in if T.null (T.strip text)
+          let paras = parseParagraphs ns txBody
+           in if null paras
               then Nothing
-              else Just $ PptxTextBox text
+              else Just $ PptxTextBox paras
         Nothing -> Nothing
 
   -- Picture: <p:pic>
@@ -115,11 +129,8 @@ parseTableRow ns trElem =
 
 -- | Convert shape to Pandoc blocks
 shapeToBlocks :: PandocMonad m => Archive -> [(Text, Text)] -> PptxShape -> m [Block]
-shapeToBlocks _archive _rels (PptxTextBox text) =
-  if T.null (T.strip text)
-    then return []  -- Skip empty
-    else return [Para [Str text]]
-
+shapeToBlocks _archive _rels (PptxTextBox paras) =
+  return $ paragraphsToBlocks paras
 shapeToBlocks archive rels (PptxPicture relId title alt) = do
   -- Resolve relationship to get media path
   case lookup relId rels of
@@ -173,12 +184,100 @@ loadMediaFromArchive archive path =
     Just entry -> Just $ fromEntry entry
     Nothing -> Nothing
 
+-- | Parse paragraphs from text box
+parseParagraphs :: NameSpaces -> Element -> [PptxParagraph]
+parseParagraphs ns txBody =
+  let pElems = findChildrenByName ns "a" "p" txBody
+   in map (parseParagraph ns) pElems
+
+-- | Parse individual paragraph
+parseParagraph :: NameSpaces -> Element -> PptxParagraph
+parseParagraph ns pElem =
+  let level = parseBulletLevel ns pElem
+      bullet = detectBulletType ns pElem
+      text = extractParagraphText ns pElem
+   in PptxParagraph level bullet text
+
+-- | Parse bullet level from paragraph properties
+parseBulletLevel :: NameSpaces -> Element -> Int
+parseBulletLevel ns pElem =
+  case findChildByName ns "a" "pPr" pElem >>=
+       findAttr (unqual "lvl") >>=
+       (\s -> readMaybe (T.unpack s) :: Maybe Int) of
+    Just lvl -> lvl
+    Nothing -> 0  -- Default to level 0
+
+-- | Detect bullet type
+detectBulletType :: NameSpaces -> Element -> BulletType
+detectBulletType ns pElem =
+  -- Check for explicit <a:pPr><a:buChar>
+  case findChildByName ns "a" "pPr" pElem >>=
+       findChildByName ns "a" "buChar" of
+    Just _buCharElem -> Bullet
+    Nothing ->
+      -- Check for Wingdings symbol (common in PowerPoint)
+      if hasWingdingsSymbol ns pElem
+        then WingdingsBullet
+        else NoBullet
+
+-- | Check if paragraph starts with Wingdings symbol
+hasWingdingsSymbol :: NameSpaces -> Element -> Bool
+hasWingdingsSymbol ns pElem =
+  let runs = findChildrenByName ns "a" "r" pElem
+      checkRun r = case findChildByName ns "a" "rPr" r >>=
+                        findChildByName ns "a" "sym" of
+                     Just symElem ->
+                       case findAttr (unqual "typeface") symElem of
+                         Just typeface -> "Wingdings" `T.isInfixOf` typeface
+                         Nothing -> False
+                     Nothing -> False
+   in any checkRun runs
+
+-- | Extract text from paragraph
+extractParagraphText :: NameSpaces -> Element -> Text
+extractParagraphText _ns pElem =
+  -- Find all <a:t> elements and concatenate
+  let textElems = filterElementsName (\qn -> qName qn == "t") pElem
+      texts = map strContent textElems
+   in T.unwords $ filter (not . T.null) texts
+
 -- | Extract text from DrawingML element (finds all <a:t> descendants)
 extractDrawingMLText :: Element -> Text
 extractDrawingMLText elem =
   let textElems = filterElementsName (\qn -> qName qn == "t") elem
       texts = map strContent textElems
    in T.unwords $ filter (not . T.null) texts
+
+-- | Convert paragraphs to blocks, grouping bullets into lists
+paragraphsToBlocks :: [PptxParagraph] -> [Block]
+paragraphsToBlocks paras =
+  -- If we have multiple paragraphs with bullets, group them
+  let hasBullets = any (\p -> paraBullet p /= NoBullet) paras
+   in if hasBullets
+      then groupBulletParagraphs paras
+      else map (\p -> Para [Str $ paraText p]) paras
+
+-- | Group bullet paragraphs into lists
+groupBulletParagraphs :: [PptxParagraph] -> [Block]
+groupBulletParagraphs paras =
+  let grouped = groupBy sameBulletLevel paras
+   in concatMap groupToBlock grouped
+  where
+    sameBulletLevel p1 p2 =
+      (paraBullet p1 /= NoBullet) &&
+      (paraBullet p2 /= NoBullet) &&
+      (paraLevel p1 == paraLevel p2)
+
+    groupToBlock :: [PptxParagraph] -> [Block]
+    groupToBlock [] = []
+    groupToBlock ps@(p:_)
+      | paraBullet p /= NoBullet =
+          -- Bullet list
+          let items = map (\para -> [Plain [Str $ paraText para]]) ps
+           in [BulletList items]
+      | otherwise =
+          -- Plain paragraph
+          map (\para -> Para [Str $ paraText para]) ps
 
 -- | Check if shape is title placeholder (also used in Slides module)
 isTitlePlaceholder :: NameSpaces -> Element -> Bool
