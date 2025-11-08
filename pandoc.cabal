@@ -864,6 +864,8 @@ test-suite test-pandoc
                   Tests.Readers.RST
                   Tests.Readers.RTF
                   Tests.Readers.Docx
+                  Tests.Readers.Pptx
+                  Tests.Readers.Xlsx
                   Tests.Readers.ODT
                   Tests.Readers.Txt2Tags
                   Tests.Readers.EPUB
