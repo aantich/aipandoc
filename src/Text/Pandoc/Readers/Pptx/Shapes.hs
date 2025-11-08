@@ -12,6 +12,8 @@ Parsing of PPTX shapes (text boxes, images, tables, diagrams).
 -}
 module Text.Pandoc.Readers.Pptx.Shapes
   ( PptxShape(..)
+  , PptxParagraph(..)
+  , BulletType(..)
   , parseShapes
   , shapeToBlocks
   , isTitlePlaceholder
@@ -28,6 +30,7 @@ import Text.Pandoc.Class.PandocMonad (PandocMonad)
 import qualified Text.Pandoc.Class.PandocMonad as P
 import Text.Pandoc.Definition
 import Text.Pandoc.Readers.OOXML.Shared
+import Text.Pandoc.Readers.Pptx.SmartArt
 import Text.Pandoc.XML.Light
 
 -- | Paragraph with bullet/numbering information
@@ -53,6 +56,10 @@ data PptxShape
       , picAlt    :: Text
       }
   | PptxTable [[Text]]                  -- Simple text cells for now
+  | PptxDiagramRef
+      { dgmDataRelId   :: Text          -- Relationship to data.xml
+      , dgmLayoutRelId :: Text          -- Relationship to layout.xml
+      }
   | PptxGraphic Text                    -- Placeholder for other graphics
   deriving (Show)
 
@@ -92,20 +99,40 @@ parseShape ns elem
 
       return $ PptxPicture relId title alt
 
-  -- Table: <p:graphicFrame> with table
-  | isElem ns "p" "graphicFrame" elem = do
-      graphic <- findChildByName ns "a" "graphic" elem
-      graphicData <- findChildByName ns "a" "graphicData" graphic
-      uri <- findAttr (unqual "uri") graphicData
-
-      if "table" `T.isInfixOf` uri
-        then do
-          tbl <- findChildByName ns "a" "tbl" graphicData
-          let rows = parseTableRows ns tbl
-          return $ PptxTable rows
-        else
-          -- Could be diagram or chart
-          return $ PptxGraphic (strContent graphicData)
+  -- GraphicFrame: table or diagram
+  | isElem ns "p" "graphicFrame" elem =
+      case findChildByName ns "a" "graphic" elem >>=
+           findChildByName ns "a" "graphicData" of
+        Nothing -> Nothing
+        Just graphicData ->
+          case findAttr (unqual "uri") graphicData of
+            Nothing -> Just $ PptxGraphic "no-uri"
+            Just uri ->
+              if "table" `T.isInfixOf` uri
+                then
+                  -- Table
+                  case findChildByName ns "a" "tbl" graphicData of
+                    Just tbl ->
+                      let rows = parseTableRows ns tbl
+                       in Just $ PptxTable rows
+                    Nothing -> Nothing
+                else if "diagram" `T.isInfixOf` uri
+                  then
+                    -- SmartArt diagram - dgm namespace is declared inline on relIds element
+                    let dgmRelIds = find (\e -> qName (elName e) == "relIds") (elChildren graphicData)
+                     in case dgmRelIds of
+                          Nothing -> Just $ PptxGraphic "diagram-no-relIds"
+                          Just relIdsElem ->
+                            -- Get r:dm and r:lo attributes (r namespace is in parent)
+                            let ns' = ns <> elemToNameSpaces relIdsElem
+                             in case (findAttrByName ns' "r" "dm" relIdsElem,
+                                      findAttrByName ns' "r" "lo" relIdsElem) of
+                                  (Just dataRelId, Just layoutRelId) ->
+                                    Just $ PptxDiagramRef dataRelId layoutRelId
+                                  _ -> Just $ PptxGraphic "diagram-missing-rels"
+                  else
+                    -- Other graphic (chart, etc.)
+                    Just $ PptxGraphic ("other: " <> uri)
 
   -- Skip other shapes for now
   | otherwise = Nothing
@@ -164,8 +191,16 @@ shapeToBlocks _archive _rels (PptxTable rows) =
           tfoot = TableFoot nullAttr []
       return [Table nullAttr caption colSpec thead tbody tfoot]
 
+shapeToBlocks archive rels (PptxDiagramRef dataRelId layoutRelId) = do
+  -- Parse SmartArt diagram
+  case parseDiagram archive rels dataRelId layoutRelId of
+    Left err -> do
+      -- Failed to parse diagram, return placeholder
+      return [Para [Str $ "[Diagram parse error: " <> err <> "]"]]
+    Right diagram ->
+      return $ diagramToBlocks diagram
 shapeToBlocks _archive _rels (PptxGraphic text) =
-  -- Placeholder for diagrams/charts
+  -- Placeholder for other graphics (charts, etc.)
   return [Para [Str $ "[Graphic: " <> text <> "]"]]
 
 -- | Resolve media path (handle relative paths)
