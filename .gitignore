@@ -50,6 +50,7 @@ doc/pptx-reader-design.md
 !data/**
 !doc/**
 doc/pptx-reader-design*.md
+doc/xlsx-reader-design.md
 test-docs/
 !linux/**
 !macos/**
