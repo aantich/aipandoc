@@ -45,7 +45,8 @@ data Pptx = Pptx
 data PptxSlide = PptxSlide
   { slideId      :: SlideId
   , slidePath    :: FilePath
-  , slideElement :: Element  -- The parsed p:sld element
+  , slideElement :: Element     -- The parsed p:sld element
+  , slideRels    :: [(Text, Text)]  -- Slide relationships
   } deriving (Show)
 
 -- | Presentation-level information from presentation.xml
@@ -203,7 +204,11 @@ parseSlide archive rels (sid, relId) = do
   -- Load and parse slide XML
   slideElem <- loadXMLFromArchive archive slidePath
 
-  return $ PptxSlide sid slidePath slideElem
+  -- Load slide-specific relationships
+  slideRelsPath <- getPresentationRelsPath archive slidePath
+  slideRels <- loadRelationships archive slideRelsPath
+
+  return $ PptxSlide sid slidePath slideElem slideRels
 
 -- | Helper: Maybe a -> Either Text a
 maybeToEither :: Text -> Maybe a -> Either Text a
