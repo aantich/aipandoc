@@ -27,6 +27,7 @@ module Text.Pandoc.Readers
   , readers
   , readDocx
   , readPptx
+  , readXlsx
   , readODT
   , readMarkdown
   , readCommonMark
@@ -89,6 +90,7 @@ import Text.Pandoc.Readers.Creole
 import Text.Pandoc.Readers.DocBook
 import Text.Pandoc.Readers.Docx
 import Text.Pandoc.Readers.Pptx
+import Text.Pandoc.Readers.Xlsx
 import Text.Pandoc.Readers.DokuWiki
 import Text.Pandoc.Readers.EPUB
 import Text.Pandoc.Readers.FB2
@@ -159,7 +161,11 @@ readers = [("native"       , TextReader readNative)
           ,("twiki"        , TextReader readTWiki)
           ,("tikiwiki"     , TextReader readTikiWiki)
           ,("docx"         , ByteStringReader readDocx)
+<<<<<<< HEAD
           ,("pptx"         , ByteStringReader readPptx)
+=======
+          ,("xlsx"         , ByteStringReader readXlsx)
+>>>>>>> pr-xlsx
           ,("odt"          , ByteStringReader readODT)
           ,("t2t"          , TextReader readTxt2Tags)
           ,("epub"         , ByteStringReader readEPUB)
